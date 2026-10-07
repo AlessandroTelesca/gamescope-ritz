@@ -28,6 +28,17 @@ Reference docs — plain links, read the one relevant to your task on demand:
   build — unless the task is specifically about the release/install build itself. See
   `scripts/README.md` and `superdoc/features/build-and-tooling.md`.
 
+- **Live audio tests: listen, don't play; 1% volume, hard cap.** When audio is already
+  running on the system, check for a signal by *reading* it (e.g. `pw-record` from a
+  monitor port) instead of playing anything — the user: *"just use the systems default
+  audio, no need to play something, if something is running"*. Any test stream an agent
+  must start plays at
+  **1% volume or less** (`pw-cat --volume 0.01`, a sink/stream volume of 0.01 set before
+  any sample flows) — "it's only silence" is no exception. Never raise, reset or re-route the
+  volume of the user's own streams, sinks or devices, and never move the user's own streams.
+  `Why:` a 2026-10-07 audio spike played "silence" at full volume and blasted the user; the
+  user's own rule: *"1% volume is enough, to see a signal"*.
+
 ## Always in context (force-loaded, mandatory)
 
 `@` is reserved for the must-always-know set. Everything above is a plain link: an
