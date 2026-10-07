@@ -62,7 +62,6 @@ scripts/gentle-build.sh --test                 # build, then run gamescope_tests
 scripts/gentle-build.sh --setup-only            # just configure, don't build
 scripts/gentle-build.sh --target src/gamescope # just the binary
 scripts/gentle-build.sh --jobs 2 --cpu-quota 70% # a bit more parallelism/duty-cycle
-GENTLE_CPUS=4-9 scripts/gentle-build.sh --jobs 2 # different core pin
 ```
 
 **When to use which:** `gentle-build.sh` for every agent build and test run, full stop.
@@ -80,7 +79,6 @@ own section on this script; this is the quick-reference version):
 | `--dir` | `build-agent` | build directory name | never touches `build-release/`/`build/`; reused (incremental) across runs of the script in the same worktree |
 | `--jobs` / `GENTLE_JOBS` | `1` | ninja parallelism, capped at `2` | fewer concurrent `cc1plus` processes is the main lever against this CPU's one shared, unpartitionable L3 cache getting thrashed — see below |
 | `--cpu-quota` / `GENTLE_CPU_QUOTA` | `50%` | `systemd-run -p CPUQuota=` on the whole build | duty-cycles even a single compiler process so the game gets uncontested stretches on the shared cache; raise toward `100%` if it's slower than you need |
-| `GENTLE_CPUS` | `6-9` | `taskset -c` + cgroup `AllowedCPUs=` | keeps compiler threads off the cores the game is likely scheduled on, protecting those cores' *private* L1/L2 (not the shared L3 — nothing can protect that on this CPU; see below) |
 | — | `-Db_lto=false` | no LTO | LTO's whole-program link is this project's single worst spike, memory or cache, and a test build doesn't need it |
 | — | `-Doptimization=2` | `-O2`, not release's `-O3` | measured against `-O1` on this project's largest translation unit — the difference was noise (4.86s vs 4.83s wall, one core), so `-O2` is kept rather than trading codegen for nothing |
 | — | `-g0` | no debug info | smaller objects, less I/O |
@@ -96,17 +94,17 @@ talking about RAM. I have enough RAM. That doesn't matter. It's the CPU cache th
 being hit hard, which is pretty slow on my 10900K."* This machine (i9-10900K) has 10
 cores, SMT **off**, and **one 20MB L3 cache shared by every core** with no Intel
 CAT/resctrl to partition it (verified: no `cat_l3` in `/proc/cpuinfo`, no
-`/sys/fs/resctrl`). A memory cap does nothing for that, and CPU pinning alone doesn't
-either — a compiler on core 7 still evicts the game's lines from the L3 every core
-shares. That's why the real levers here are concurrency (`--jobs`) and duty-cycle
-(`--cpu-quota`), with pinning kept only for what it *can* still do (protect a core's
-private L1/L2). See `superdoc/features/build-and-tooling.md`'s own section for the full
+`/sys/fs/resctrl`). A memory cap does nothing for that, and neither does CPU pinning —
+a compiler on core 7 still evicts the game's lines from the L3 every core shares.
+That's why the real levers here are concurrency (`--jobs`) and duty-cycle
+(`--cpu-quota`). The script sets no CPU affinity: the user enforces it system-wide
+(2026-10-07). See `superdoc/features/build-and-tooling.md`'s own section for the full
 reasoning and the measurements behind each kept/dropped flag.
 
 `--test` runs `<dir>/tests/gamescope_tests` under the identical gentle wrapper afterward.
 Fails loudly (non-zero exit, a clear message naming what failed) on either a build or a
 test failure. `systemd-run --user --scope` availability is checked once, up front; if it
-doesn't work in the session, the script falls back to `chrt`/`nice`/`ionice`/`taskset`
+doesn't work in the session, the script falls back to `chrt`/`nice`/`ionice`
 alone and says so, rather than silently skipping the cgroup limits.
 
 **Measured on this machine:** a genuinely cold (empty ccache) full build of all 679

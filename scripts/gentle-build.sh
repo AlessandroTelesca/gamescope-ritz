@@ -42,15 +42,7 @@
 #      *while* it has the core. Raise it (up to `100%` = no extra cap)
 #      if `-j1 --cpu-quota 50%` feels too slow for how gentle you actually
 #      need to be.
-#   3. **CPU pinning stays, for a narrower reason.** `taskset -c` (process
-#      affinity) plus `-p AllowedCPUs=` (the cgroup's own cpuset, belt and
-#      braces) keep every compiler/linker thread off the cores the game is
-#      most likely scheduled on — protecting THOSE cores' *private* L1/L2 (and
-#      their SMT sibling, if your CPU has one — check `lscpu -e` for CORE
-#      values shared by two CPU numbers, and keep sibling pairs together in
-#      `GENTLE_CPUS` rather than splitting one). It does nothing for the
-#      shared L3 (see above) — that's levers 1 and 2's job.
-#   4. **Less total compiler work.** No LTO (unchanged from the first
+#   3. **Less total compiler work.** No LTO (unchanged from the first
 #      draft — LTO's whole-program link is still the worst single spike in
 #      this project's build, memory or cache). `-g0` (skip debug info: less
 #      I/O, smaller objects) and `-fuse-ld=lld` (used only if present AND a
@@ -65,7 +57,7 @@
 #      runtime either, and there is nothing to trade it for). If your build
 #      ever changes shape enough to make `-O1` worth revisiting, re-measure
 #      the same way rather than assuming.
-#   5. **Avoid full rebuilds.** The single biggest total-cache-time burner
+#   4. **Avoid full rebuilds.** The single biggest total-cache-time burner
 #      is several agent worktrees each doing a from-scratch ~670-target
 #      build. This script does its part by reusing one fixed, persistent
 #      build dir per worktree (default `build-agent/`, see
@@ -137,18 +129,16 @@
 #   -h, --help         show this help and exit
 #
 # Env overrides:
-#   GENTLE_CPUS         taskset/AllowedCPUs core list (default: 6-9). Check
-#                       `lscpu -e` first — keep SMT sibling pairs together if
-#                       your CPU has SMT (this one doesn't).
 #   GENTLE_JOBS         same as --jobs
 #   GENTLE_CPU_QUOTA    same as --cpu-quota
+#
+# CPU affinity is not set here: the user enforces it system-wide (2026-10-07).
 #
 # Examples:
 #   scripts/gentle-build.sh                       # full gentle build -> build-agent/
 #   scripts/gentle-build.sh --test                 # build, then run the test suite
 #   scripts/gentle-build.sh --jobs 2 --cpu-quota 70%
 #   scripts/gentle-build.sh --target src/gamescope # just the binary
-#   GENTLE_CPUS=4-9 scripts/gentle-build.sh --jobs 2
 
 set -euo pipefail
 
@@ -158,13 +148,12 @@ source "$SCRIPT_DIR/gamescope-ritz-common.sh"
 
 DIR_NAME="build-agent"
 JOBS="${GENTLE_JOBS:-1}"
-CPUS="${GENTLE_CPUS:-6-9}"
 CPU_QUOTA="${GENTLE_CPU_QUOTA:-50%}"
 TARGETS=()
 SETUP_ONLY=0
 RUN_TESTS=0
 
-print_help() { sed -n '2,152p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
+print_help() { sed -n '2,141p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
 
 while [ $# -gt 0 ]; do
 	case "$1" in
@@ -189,11 +178,6 @@ fi
 
 REPO_ROOT=$(gcr_repo_root)
 BUILD_DIR="$REPO_ROOT/$DIR_NAME"
-
-# --- CPU pinning ----------------------------------------------------------
-HAVE_TASKSET=0
-command -v taskset >/dev/null 2>&1 && HAVE_TASKSET=1
-[ "$HAVE_TASKSET" = "1" ] || gcr_warn "taskset not found — building without CPU pinning."
 
 # --- compiler / linker detection ------------------------------------------
 CXX="${CXX:-c++}"
@@ -228,7 +212,7 @@ C_ARGS_STR="${GENTLE_C_ARGS[*]}"
 LINK_ARGS_STR="${GENTLE_LINK_ARGS[*]:-}"
 
 # --- ccache auto-detect -----------------------------------------------------
-# Point 5 above: caching object files across runs/worktrees is the other
+# Point 4 above: caching object files across runs/worktrees is the other
 # half of "avoid full rebuilds", and it's ccache's job, not this script's own
 # reinvention of it. Wired in automatically, with no config file to edit,
 # whenever ccache happens to be on PATH; a plain warning (not a failure)
@@ -297,14 +281,13 @@ if command -v systemd-run >/dev/null 2>&1 \
 	&& systemd-run --user --scope --quiet -p CPUQuota=50% -- /bin/true >/dev/null 2>&1; then
 	HAVE_SYSTEMD_SCOPE=1
 else
-	gcr_warn "systemd-run --user --scope isn't usable in this session — falling back to chrt/nice/ionice/taskset alone (no CPUQuota/CPUWeight/IOWeight/AllowedCPUs cgroup limits)."
+	gcr_warn "systemd-run --user --scope isn't usable in this session — falling back to chrt/nice/ionice alone (no CPUQuota/CPUWeight/IOWeight cgroup limits)."
 fi
 
 # --- the gentle wrapper ------------------------------------------------------
-# Runs "$@" at the lowest CPU/IO priority the kernel offers, pinned to
-# GENTLE_CPUS, and — when available — inside a transient user scope that
-# duty-cycle-caps its total CPU time (CPUQuota) and reinforces the pin at
-# the cgroup level (AllowedCPUs). `systemd-run --scope` (not the default
+# Runs "$@" at the lowest CPU/IO priority the kernel offers and — when
+# available — inside a transient user scope that duty-cycle-caps its total
+# CPU time (CPUQuota). `systemd-run --scope` (not the default
 # service mode) runs the command as a direct child of this shell, inheriting
 # its environment and cwd and returning its real exit code, so it composes
 # like a plain command despite the wrapping.
@@ -313,7 +296,6 @@ gentle_run() {
 	command -v chrt >/dev/null 2>&1 && inner+=(chrt --idle 0)
 	inner+=(nice -n 19)
 	command -v ionice >/dev/null 2>&1 && inner+=(ionice -c3)
-	[ "$HAVE_TASKSET" = "1" ] && inner+=(taskset -c "$CPUS")
 	inner+=("$@")
 
 	if [ "$HAVE_SYSTEMD_SCOPE" = "1" ]; then
@@ -321,7 +303,6 @@ gentle_run() {
 			-p CPUWeight=idle \
 			-p IOWeight=1 \
 			-p CPUQuota="$CPU_QUOTA" \
-			-p AllowedCPUs="$CPUS" \
 			-- "${inner[@]}"
 	else
 		"${inner[@]}"
@@ -329,8 +310,8 @@ gentle_run() {
 }
 
 # --- summary -----------------------------------------------------------------
-gcr_info "gentle-build: dir=$BUILD_DIR jobs=$JOBS cpus=${CPUS}$([ "$HAVE_TASKSET" = "1" ] || echo ' (unpinned: no taskset)')"
-gcr_info "gentle-build: sched=chrt(SCHED_IDLE)+nice19+ionice(idle) cgroup=$([ "$HAVE_SYSTEMD_SCOPE" = "1" ] && echo "CPUWeight=idle IOWeight=1 CPUQuota=$CPU_QUOTA AllowedCPUs=$CPUS (systemd-run --user --scope)" || echo "none (systemd-run scope unavailable)")"
+gcr_info "gentle-build: dir=$BUILD_DIR jobs=$JOBS"
+gcr_info "gentle-build: sched=chrt(SCHED_IDLE)+nice19+ionice(idle) cgroup=$([ "$HAVE_SYSTEMD_SCOPE" = "1" ] && echo "CPUWeight=idle IOWeight=1 CPUQuota=$CPU_QUOTA (systemd-run --user --scope)" || echo "none (systemd-run scope unavailable)")"
 gcr_info "gentle-build: cc=$([ "$IS_GCC" = "1" ] && echo gcc || echo non-gcc/unknown) c_args='${C_ARGS_STR}' ld=$([ "$USE_LLD" = "1" ] && echo lld || echo default) ccache=$([ "$USE_CCACHE" = "1" ] && echo yes || echo no)"
 
 # --- build -------------------------------------------------------------------

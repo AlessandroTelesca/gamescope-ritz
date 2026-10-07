@@ -377,7 +377,7 @@ different resource with different rules: this machine (i9-10900K) has 10 cores, 
 cache shared by every core over the ring**, with no Intel CAT/resctrl to partition it
 (verified: no `cat_l3` in `/proc/cpuinfo`, no `/sys/fs/resctrl` on this machine —
 consumer Comet Lake doesn't support it). Memory limits do nothing for that, and neither
-does CPU pinning by itself — a compiler on core 7 still evicts the game's lines from the
+does CPU pinning — a compiler on core 7 still evicts the game's lines from the
 one L3 every core shares. What actually helps a *shared, unpartitionable* L3:
 
 1. **Fewer concurrent compilers, first and foremost.** Every `cc1plus` instance streams
@@ -390,13 +390,7 @@ one L3 every core shares. What actually helps a *shared, unpartitionable* L3:
    refill its own working set — `SCHED_IDLE`/`nice` alone don't do this, since they only
    step aside when a core would otherwise sit idle, not cap how hard a process runs
    *while* it holds the core.
-3. **CPU pinning still matters, for a narrower reason.** `taskset -c` plus the cgroup's
-   own `AllowedCPUs=` (default `GENTLE_CPUS=6-9`, the last 4 of this 10-core box) keep
-   every compiler thread off the cores the game is most likely scheduled on, protecting
-   *those* cores' private L1/L2 (and their SMT sibling, on a CPU that has one — keep
-   sibling pairs together in `GENTLE_CPUS` rather than splitting one; check with
-   `lscpu -e`). It does nothing for the shared L3 — that's levers 1 and 2's job.
-4. **Less total compiler work**: no LTO (`-Db_lto=false` — LTO's whole-program link is
+3. **Less total compiler work**: no LTO (`-Db_lto=false` — LTO's whole-program link is
    still this project's single worst spike, memory or cache), `-g0` (skip debug info),
    `-fuse-ld=lld` when a trial link with it succeeds (lower memory *and* a measurably
    faster link than bfd — less time spent hammering the cache). `-Doptimization` was
@@ -406,7 +400,7 @@ one L3 every core shares. What actually helps a *shared, unpartitionable* L3:
    `--param ggc-min-*` flags from the first (RAM-focused) draft are gone: they cost real
    compile time and were never shown to move L3 pressure (no `perf`, no `cat_l3` on this
    machine to even measure that), so they're dropped rather than kept on faith.
-5. **Avoid full rebuilds altogether where possible.** The single biggest total-cache-time
+4. **Avoid full rebuilds altogether where possible.** The single biggest total-cache-time
    cost is several agent worktrees each doing a from-scratch ~670-target build.
    `gentle-build.sh` reuses one fixed, persistent `build-agent/` per worktree
    (`gcr_meson_configure` reconfigures an existing dir in place rather than wiping it),
@@ -432,7 +426,7 @@ one L3 every core shares. What actually helps a *shared, unpartitionable* L3:
    so without this check a pre-ccache build dir would silently never pick it up.
 
 Measured on this machine (10-core i9-10900K, `-j1`, `--cpu-quota 50%`, pinned to cores
-6-9, the user actively running CS2 through a separate gamescope-ritz instance the whole
+6-9 (history: the script pinned then), the user actively running CS2 through a separate gamescope-ritz instance the whole
 time): a from-scratch (empty ccache) full build of all 679 ninja targets, including
 `tests/gamescope_tests`, took **14m43s wall** (7m3s user, 19s sys — the gap between wall
 and user time IS the CPUQuota throttle doing its job); `meson test` equivalent
@@ -442,7 +436,7 @@ cases, 15,953,549 assertions**, in 3s. `ccache -s` after that cold run already s
 the same shared source under identical flags, so even a "cold" run gets some reuse
 within itself. The systemd scope's limits were confirmed live via `systemctl --user show
 -p CPUQuotaPerSecUSec -p AllowedCPUs run-<id>.scope` while the build ran (`500ms` and
-`6-9` respectively), not just assumed from the flags passed.
+`6-9` respectively; historical, the script no longer sets `AllowedCPUs`), not just assumed from the flags passed.
 
 A second full build into a **fresh** `build-agent2/` directory (simulating a second
 agent worktree building the same commit, cache warm from the first run) took **18s
@@ -462,8 +456,12 @@ scripts/gentle-build.sh                       # full gentle build -> build-agent
 scripts/gentle-build.sh --test                 # build, then run gamescope_tests gently
 scripts/gentle-build.sh --jobs 2 --cpu-quota 70%
 scripts/gentle-build.sh --target src/gamescope # just the binary
-GENTLE_CPUS=4-9 scripts/gentle-build.sh --jobs 2
 ```
+
+`Why:` (2026-10-07) the script no longer pins CPUs (`taskset`, cgroup `AllowedCPUs=` and
+`GENTLE_CPUS` are gone): the user now enforces core affinity system-wide (*"No need to
+manually pin cores anymore. I have it enforced system wide now."*), so a second pin in
+the script was redundant. Pinning never helped the shared L3 anyway.
 
 Full option/knob reference: `scripts/gentle-build.sh --help` (the script's own header
 comment; kept in sync there rather than duplicated in full here) and `scripts/README.md`'s
