@@ -9,6 +9,12 @@ All notable user-facing changes, newest first. Categories:
 
 The newest version below is the one this build reports.
 
+## [0.11.3] – 2026-10-26
+
+### Fixed
+- **Desktop window drawing**: in a window on GNOME, gamescope no longer draws a new
+  frame into a picture the desktop is still showing while the HUD or crosshair is up.
+
 ## [0.11.2] – 2026-10-06
 
 ### Fixed
